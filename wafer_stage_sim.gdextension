@@ -1,0 +1,14 @@
+[configuration]
+
+entry_symbol = "reticle_stage_library_init"
+compatibility_minimum = 4.2
+reloadable = true
+
+[libraries]
+
+windows.debug.x86_64 = "bin/libwafer_stage_sim.windows.template_debug.x86_64.dll"
+windows.release.x86_64 = "bin/libwafer_stage_sim.windows.template_release.x86_64.dll"
+windows.debug.x86_32 = "bin/libwafer_stage_sim.windows.template_debug.x86_32.dll"
+windows.release.x86_32 = "bin/libwafer_stage_sim.windows.template_release.x86_32.dll"
+linux.debug.x86_64 = "bin/libwafer_stage_sim.linux.template_debug.x86_64.so"
+linux.release.x86_64 = "bin/libwafer_stage_sim.linux.template_release.x86_64.so"

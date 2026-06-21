@@ -32,6 +32,13 @@ private:
     double derivative_filter_cutoff;
     double derivative_filter_sample_rate;
 
+    bool noise_enabled;
+    double noise_acoustic_amplitude_nm;
+    double noise_acoustic_cutoff_hz;
+    double noise_drift_amplitude_nm;
+    double noise_drift_bandwidth_hz;
+    int64_t noise_seed;
+
 protected:
     static void _bind_methods();
 
@@ -90,6 +97,26 @@ public:
 
     bool get_use_threaded_mode() const;
     void set_use_threaded_mode(bool p_enable);
+
+    bool get_noise_enabled() const;
+    void set_noise_enabled(bool p_enable);
+
+    double get_noise_acoustic_amplitude_nm() const;
+    void set_noise_acoustic_amplitude_nm(double p_amp);
+
+    double get_noise_acoustic_cutoff_hz() const;
+    void set_noise_acoustic_cutoff_hz(double p_hz);
+
+    double get_noise_drift_amplitude_nm() const;
+    void set_noise_drift_amplitude_nm(double p_amp);
+
+    double get_noise_drift_bandwidth_hz() const;
+    void set_noise_drift_bandwidth_hz(double p_hz);
+
+    int64_t get_noise_seed() const;
+    void set_noise_seed(int64_t p_seed);
+
+    double get_current_noise_nm() const;
 
     double get_time_scale() const;
     void set_time_scale(double p_scale);

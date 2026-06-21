@@ -29,7 +29,9 @@ StageDynamics::StageDynamics()
     , step_counter_(0)
     , nan_detected_(false)
     , nan_recovery_count_(0)
-    , stable_since_(-1.0) {
+    , stable_since_(-1.0)
+    , current_noise_m_(0.0)
+    , current_noise_nm_snapshot_(0.0) {
 
     params_.mass = 50.0;
     params_.lorentz_force_constant = 50.0;
@@ -46,6 +48,13 @@ StageDynamics::StageDynamics()
     params_.derivative_filter_cutoff = 1500.0;
     params_.derivative_filter_sample_rate = 1.0 / THREAD_DT;
 
+    params_.noise_acoustic_amplitude_nm = 0.05;
+    params_.noise_acoustic_cutoff_hz = 150.0;
+    params_.noise_drift_amplitude_nm = 0.02;
+    params_.noise_drift_bandwidth_hz = 0.05;
+    params_.noise_enabled = false;
+    params_.noise_seed = 0;
+
     state_ = StageState(0.0, 0.0);
     state_snapshot_ = state_;
 
@@ -57,6 +66,16 @@ StageDynamics::StageDynamics()
         500.0,
         params_.derivative_filter_sample_rate
     );
+
+    interferometer_noise_ = std::make_unique<MultiAxisInterferometerNoise>(6);
+    interferometer_noise_->set_sample_rate(1.0 / params_.simulation_dt);
+    interferometer_noise_->set_acoustic_cutoff(params_.noise_acoustic_cutoff_hz);
+    interferometer_noise_->set_acoustic_amplitude(params_.noise_acoustic_amplitude_nm);
+    interferometer_noise_->set_drift_amplitude(params_.noise_drift_amplitude_nm);
+    interferometer_noise_->set_drift_bandwidth(params_.noise_drift_bandwidth_hz);
+    if (params_.noise_seed != 0) {
+        interferometer_noise_->set_seed(params_.noise_seed);
+    }
 }
 
 StageDynamics::~StageDynamics() {
@@ -83,6 +102,17 @@ void StageDynamics::initialize(const StageParams &params) {
         500.0,
         params_.derivative_filter_sample_rate
     );
+
+    interferometer_noise_ = std::make_unique<MultiAxisInterferometerNoise>(6);
+    interferometer_noise_->set_sample_rate(1.0 / params_.simulation_dt);
+    interferometer_noise_->set_acoustic_cutoff(params_.noise_acoustic_cutoff_hz);
+    interferometer_noise_->set_acoustic_amplitude(params_.noise_acoustic_amplitude_nm);
+    interferometer_noise_->set_drift_amplitude(params_.noise_drift_amplitude_nm);
+    interferometer_noise_->set_drift_bandwidth(params_.noise_drift_bandwidth_hz);
+    if (params_.noise_seed != 0) {
+        interferometer_noise_->set_seed(params_.noise_seed);
+    }
+
     reset();
 }
 
@@ -110,6 +140,9 @@ void StageDynamics::reset() {
 
     if (derivative_filter_) derivative_filter_->reset();
     if (velocity_filter_) velocity_filter_->reset();
+    if (interferometer_noise_) interferometer_noise_->reset();
+    current_noise_m_ = 0.0;
+    current_noise_nm_snapshot_ = 0.0;
 
     double distance = std::abs(params_.target_position);
     double accel = std::abs(params_.accel_command);
@@ -254,6 +287,7 @@ void StageDynamics::snapshot_state_locked() {
     settling_time_snapshot_ = settling_time_;
     settled_snapshot_ = settled_;
     waveform_snapshot_ = waveform_;
+    current_noise_nm_snapshot_ = current_noise_m_ * 1e9;
 }
 
 void StageDynamics::orthonormalize_coupling() {
@@ -327,71 +361,63 @@ bool StageDynamics::check_and_recover_nan() {
 }
 
 void StageDynamics::step_internal(double dt) {
-    double tracking_error = compute_tracking_error(sim_time_);
-    double ref_vel = compute_reference_velocity(sim_time_);
-    double raw_derivative = (tracking_error - prev_error_) / dt;
-    prev_error_ = tracking_error;
-
-    if (derivative_filter_) {
-        filtered_derivative_ = derivative_filter_->process(raw_derivative);
+    if (params_.noise_enabled && interferometer_noise_) {
+        current_noise_m_ = interferometer_noise_->get_noise(0);
     } else {
-        filtered_derivative_ = raw_derivative;
+        current_noise_m_ = 0.0;
     }
 
-    double velocity_error = ref_vel - state_.v;
-    double combined_deriv = 0.7 * filtered_derivative_ + 0.3 * velocity_error;
+    double step_noise = current_noise_m_;
+    double ref_pos = compute_reference_position(sim_time_);
+    double ref_vel = compute_reference_velocity(sim_time_);
+
+    double sensed_pos0 = state_.x + step_noise;
+    double tracking_error_0;
+    if (phase_ == MotionPhase::ACCELERATE || phase_ == MotionPhase::DECELERATE) {
+        tracking_error_0 = ref_pos - sensed_pos0;
+    } else {
+        tracking_error_0 = params_.target_position - sensed_pos0;
+    }
+
+    double raw_deriv_0 = (tracking_error_0 - prev_error_) / dt;
+    prev_error_ = tracking_error_0;
+
+    if (derivative_filter_) {
+        filtered_derivative_ = derivative_filter_->process(raw_deriv_0);
+    } else {
+        filtered_derivative_ = raw_deriv_0;
+    }
+
+    double vel_err_0 = ref_vel - state_.v;
+    double combined_deriv_0 = 0.7 * filtered_derivative_ + 0.3 * vel_err_0;
 
     if (phase_ == MotionPhase::SETTLE || phase_ == MotionPhase::SETTLED) {
-        if (tracking_error * integral_error_ < 0.0) {
+        if (tracking_error_0 * integral_error_ < 0.0) {
             integral_error_ *= 0.9;
         }
-        integral_error_ += tracking_error * dt;
+        integral_error_ += tracking_error_0 * dt;
         integral_error_ = std::clamp(integral_error_, -1e-8, 1e-8);
     } else {
         double decay = std::exp(-dt * 100.0);
         integral_error_ *= decay;
     }
 
-    double ff_accel = compute_feedforward_accel(sim_time_);
-    double ff_current = (params_.mass * ff_accel) / params_.lorentz_force_constant;
-    double lin_spring = (params_.spring_stiffness * (state_.x - params_.target_position)) / params_.lorentz_force_constant;
-
-    double filtered_v = state_.v;
-    if (velocity_filter_) {
-        filtered_v = velocity_filter_->process(state_.v);
-    }
-    double lin_damping = (params_.passive_damping * filtered_v) / params_.lorentz_force_constant;
-
-    double active_force = compute_active_force(tracking_error, combined_deriv, integral_error_);
-    double active_current = active_force / params_.lorentz_force_constant;
-
-    double total_current = ff_current + lin_spring + lin_damping + active_current;
-    double max_current = params_.max_force / params_.lorentz_force_constant;
-    total_current = std::clamp(total_current, -max_current, max_current);
-
-    double f_lorentz = compute_lorentz_force(total_current);
-    double f_spring = compute_spring_force(state_.x);
-    double f_damping = compute_passive_damping_force(filtered_v);
-
-    auto dynamics_func = [this]
+    auto dynamics_func = [this, step_noise]
                          (const StageState &s, double t) -> StageDerivative {
         double ref_p = compute_reference_position(t);
         double ref_v_local = compute_reference_velocity(t);
-        double t_err = ref_p - s.x;
-        double v_err = ref_v_local - s.v;
 
-        static thread_local double prev_t_err = 0.0;
-        static thread_local bool first = true;
-        double deriv;
-        if (first) {
-            deriv = 0.0;
-            first = false;
+        double sensed_x = s.x + step_noise;
+
+        double t_err;
+        MotionPhase ph = phase_;
+        if (ph == MotionPhase::ACCELERATE || ph == MotionPhase::DECELERATE) {
+            t_err = ref_p - sensed_x;
         } else {
-            deriv = (t_err - prev_t_err) / std::max(1e-9, t - (t - params_.simulation_dt));
+            t_err = params_.target_position - sensed_x;
         }
-        prev_t_err = t_err;
 
-        double combined_d = 0.7 * deriv + 0.3 * v_err;
+        double v_err = ref_v_local - s.v;
 
         double ff_a = 0.0;
         if (t < decel_start_time_) {
@@ -401,9 +427,11 @@ void StageDynamics::step_internal(double dt) {
         }
 
         double ff_c = (params_.mass * ff_a) / params_.lorentz_force_constant;
-        double ls = (params_.spring_stiffness * (s.x - params_.target_position)) / params_.lorentz_force_constant;
+        double ls = (params_.spring_stiffness * (sensed_x - params_.target_position)) / params_.lorentz_force_constant;
         double ld = (params_.passive_damping * s.v) / params_.lorentz_force_constant;
-        double af = compute_active_force(t_err, combined_d, integral_error_);
+
+        double deriv_est = v_err;
+        double af = compute_active_force(t_err, deriv_est, integral_error_);
         double ac = af / params_.lorentz_force_constant;
         double tc = ff_c + ls + ld + ac;
 
@@ -417,7 +445,6 @@ void StageDynamics::step_internal(double dt) {
         double total_force = f_lor + f_spr + f_dmp;
         total_force = std::clamp(total_force, -params_.max_force, params_.max_force);
         double accel = total_force / params_.mass;
-
         accel = std::clamp(accel, -1000.0, 1000.0);
 
         return StageDerivative(s.v, accel);
@@ -430,7 +457,18 @@ void StageDynamics::step_internal(double dt) {
     check_and_recover_nan();
     orthonormalize_coupling();
     update_phase(sim_time_);
-    record_sample_internal(f_lorentz, f_spring, f_damping, total_current);
+
+    double f_lorentz = compute_lorentz_force(
+        (params_.mass * compute_feedforward_accel(sim_time_)) / params_.lorentz_force_constant
+        + (params_.spring_stiffness * (state_.x + step_noise - params_.target_position)) / params_.lorentz_force_constant
+        + (params_.passive_damping * state_.v) / params_.lorentz_force_constant
+        + compute_active_force(tracking_error_0, combined_deriv_0, integral_error_) / params_.lorentz_force_constant
+    );
+    f_lorentz = std::clamp(f_lorentz, -params_.max_force, params_.max_force);
+
+    record_sample_internal(f_lorentz, compute_spring_force(state_.x),
+                          compute_passive_damping_force(state_.v),
+                          f_lorentz / params_.lorentz_force_constant);
 
     step_counter_.fetch_add(1);
 }
@@ -595,6 +633,44 @@ void StageDynamics::set_accel_command(double accel) {
         accel_duration_ = std::sqrt(distance / a);
     }
     snapshot_state_locked();
+}
+
+double StageDynamics::get_current_noise_nm() const {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return current_noise_nm_snapshot_;
+}
+
+bool StageDynamics::is_noise_enabled() const {
+    return params_.noise_enabled;
+}
+
+void StageDynamics::set_noise_enabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    params_.noise_enabled = enabled;
+}
+
+void StageDynamics::set_noise_acoustic_amplitude_nm(double amp) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    params_.noise_acoustic_amplitude_nm = amp;
+    if (interferometer_noise_) {
+        interferometer_noise_->set_acoustic_amplitude(amp);
+    }
+}
+
+void StageDynamics::set_noise_drift_amplitude_nm(double amp) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    params_.noise_drift_amplitude_nm = amp;
+    if (interferometer_noise_) {
+        interferometer_noise_->set_drift_amplitude(amp);
+    }
+}
+
+void StageDynamics::set_noise_seed(uint64_t seed) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    params_.noise_seed = seed;
+    if (interferometer_noise_ && seed != 0) {
+        interferometer_noise_->set_seed(seed);
+    }
 }
 
 }

@@ -2,6 +2,7 @@
 
 #include "rk4_integrator.h"
 #include "elliptic_filter.h"
+#include "interferometer_noise.h"
 #include <cstdint>
 #include <vector>
 #include <atomic>
@@ -47,6 +48,13 @@ struct StageParams {
     double max_force;
     double derivative_filter_cutoff;
     double derivative_filter_sample_rate;
+
+    double noise_acoustic_amplitude_nm;
+    double noise_acoustic_cutoff_hz;
+    double noise_drift_amplitude_nm;
+    double noise_drift_bandwidth_hz;
+    bool noise_enabled;
+    uint64_t noise_seed;
 };
 
 class StageDynamics {
@@ -76,6 +84,10 @@ private:
 
     std::unique_ptr<EllipticLowPass4> derivative_filter_;
     std::unique_ptr<EllipticLowPass4> velocity_filter_;
+
+    std::unique_ptr<MultiAxisInterferometerNoise> interferometer_noise_;
+    double current_noise_m_;
+    double current_noise_nm_snapshot_;
 
     std::vector<WaveformSample> waveform_;
     std::vector<WaveformSample> waveform_snapshot_;
@@ -150,6 +162,13 @@ public:
     uint64_t get_step_counter() const { return step_counter_.load(); }
     bool has_nan() const { return nan_detected_.load(); }
     uint32_t get_nan_recovery_count() const { return nan_recovery_count_.load(); }
+
+    double get_current_noise_nm() const;
+    bool is_noise_enabled() const;
+    void set_noise_enabled(bool enabled);
+    void set_noise_acoustic_amplitude_nm(double amp);
+    void set_noise_drift_amplitude_nm(double amp);
+    void set_noise_seed(uint64_t seed);
 };
 
 }

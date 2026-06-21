@@ -24,7 +24,13 @@ ReticleStageSim::ReticleStageSim()
     , settling_threshold_nm(0.1)
     , max_force(50000.0)
     , derivative_filter_cutoff(1500.0)
-    , derivative_filter_sample_rate(10000.0) {}
+    , derivative_filter_sample_rate(10000.0)
+    , noise_enabled(true)
+    , noise_acoustic_amplitude_nm(0.05)
+    , noise_acoustic_cutoff_hz(150.0)
+    , noise_drift_amplitude_nm(0.02)
+    , noise_drift_bandwidth_hz(0.05)
+    , noise_seed(42) {}
 
 ReticleStageSim::~ReticleStageSim() {
     stop_simulation();
@@ -71,6 +77,12 @@ void ReticleStageSim::start_simulation() {
     params.max_force = max_force;
     params.derivative_filter_cutoff = derivative_filter_cutoff;
     params.derivative_filter_sample_rate = derivative_filter_sample_rate;
+    params.noise_enabled = noise_enabled;
+    params.noise_acoustic_amplitude_nm = noise_acoustic_amplitude_nm;
+    params.noise_acoustic_cutoff_hz = noise_acoustic_cutoff_hz;
+    params.noise_drift_amplitude_nm = noise_drift_amplitude_nm;
+    params.noise_drift_bandwidth_hz = noise_drift_bandwidth_hz;
+    params.noise_seed = static_cast<uint64_t>(noise_seed);
 
     dynamics_.initialize(params);
     running_ = true;
@@ -97,6 +109,12 @@ void ReticleStageSim::reset_simulation() {
     params.max_force = max_force;
     params.derivative_filter_cutoff = derivative_filter_cutoff;
     params.derivative_filter_sample_rate = derivative_filter_sample_rate;
+    params.noise_enabled = noise_enabled;
+    params.noise_acoustic_amplitude_nm = noise_acoustic_amplitude_nm;
+    params.noise_acoustic_cutoff_hz = noise_acoustic_cutoff_hz;
+    params.noise_drift_amplitude_nm = noise_drift_amplitude_nm;
+    params.noise_drift_bandwidth_hz = noise_drift_bandwidth_hz;
+    params.noise_seed = static_cast<uint64_t>(noise_seed);
 
     dynamics_.initialize(params);
 }
@@ -162,6 +180,44 @@ void ReticleStageSim::set_use_threaded_mode(bool p_enable) {
         stop_simulation();
     }
     use_threaded_mode_ = p_enable;
+}
+
+bool ReticleStageSim::get_noise_enabled() const { return noise_enabled; }
+void ReticleStageSim::set_noise_enabled(bool p_enable) {
+    noise_enabled = p_enable;
+    dynamics_.set_noise_enabled(p_enable);
+}
+
+double ReticleStageSim::get_noise_acoustic_amplitude_nm() const { return noise_acoustic_amplitude_nm; }
+void ReticleStageSim::set_noise_acoustic_amplitude_nm(double p_amp) {
+    noise_acoustic_amplitude_nm = p_amp;
+    dynamics_.set_noise_acoustic_amplitude_nm(p_amp);
+}
+
+double ReticleStageSim::get_noise_acoustic_cutoff_hz() const { return noise_acoustic_cutoff_hz; }
+void ReticleStageSim::set_noise_acoustic_cutoff_hz(double p_hz) {
+    noise_acoustic_cutoff_hz = p_hz;
+}
+
+double ReticleStageSim::get_noise_drift_amplitude_nm() const { return noise_drift_amplitude_nm; }
+void ReticleStageSim::set_noise_drift_amplitude_nm(double p_amp) {
+    noise_drift_amplitude_nm = p_amp;
+    dynamics_.set_noise_drift_amplitude_nm(p_amp);
+}
+
+double ReticleStageSim::get_noise_drift_bandwidth_hz() const { return noise_drift_bandwidth_hz; }
+void ReticleStageSim::set_noise_drift_bandwidth_hz(double p_hz) {
+    noise_drift_bandwidth_hz = p_hz;
+}
+
+int64_t ReticleStageSim::get_noise_seed() const { return noise_seed; }
+void ReticleStageSim::set_noise_seed(int64_t p_seed) {
+    noise_seed = p_seed;
+    dynamics_.set_noise_seed(static_cast<uint64_t>(p_seed));
+}
+
+double ReticleStageSim::get_current_noise_nm() const {
+    return dynamics_.get_current_noise_nm();
 }
 
 double ReticleStageSim::get_time_scale() const { return time_scale_; }
@@ -324,6 +380,32 @@ void ReticleStageSim::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_use_threaded_mode"), &ReticleStageSim::get_use_threaded_mode);
     ClassDB::bind_method(D_METHOD("set_use_threaded_mode", "enable"), &ReticleStageSim::set_use_threaded_mode);
     ADD_PROPERTY(PropertyInfo(Variant::BOOL, "use_threaded_10kHz_physics"), "set_use_threaded_mode", "get_use_threaded_mode");
+
+    ClassDB::bind_method(D_METHOD("get_noise_enabled"), &ReticleStageSim::get_noise_enabled);
+    ClassDB::bind_method(D_METHOD("set_noise_enabled", "enable"), &ReticleStageSim::set_noise_enabled);
+    ADD_PROPERTY(PropertyInfo(Variant::BOOL, "noise/ffu_turbulence_enabled"), "set_noise_enabled", "get_noise_enabled");
+
+    ClassDB::bind_method(D_METHOD("get_noise_acoustic_amplitude_nm"), &ReticleStageSim::get_noise_acoustic_amplitude_nm);
+    ClassDB::bind_method(D_METHOD("set_noise_acoustic_amplitude_nm", "amp_nm"), &ReticleStageSim::set_noise_acoustic_amplitude_nm);
+    ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "noise/acoustic_amplitude_nm", PROPERTY_HINT_RANGE, "0.0,5.0,0.01"), "set_noise_acoustic_amplitude_nm", "get_noise_acoustic_amplitude_nm");
+
+    ClassDB::bind_method(D_METHOD("get_noise_acoustic_cutoff_hz"), &ReticleStageSim::get_noise_acoustic_cutoff_hz);
+    ClassDB::bind_method(D_METHOD("set_noise_acoustic_cutoff_hz", "hz"), &ReticleStageSim::set_noise_acoustic_cutoff_hz);
+    ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "noise/acoustic_cutoff_hz", PROPERTY_HINT_RANGE, "10,5000,10"), "set_noise_acoustic_cutoff_hz", "get_noise_acoustic_cutoff_hz");
+
+    ClassDB::bind_method(D_METHOD("get_noise_drift_amplitude_nm"), &ReticleStageSim::get_noise_drift_amplitude_nm);
+    ClassDB::bind_method(D_METHOD("set_noise_drift_amplitude_nm", "amp_nm"), &ReticleStageSim::set_noise_drift_amplitude_nm);
+    ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "noise/drift_amplitude_nm", PROPERTY_HINT_RANGE, "0.0,2.0,0.001"), "set_noise_drift_amplitude_nm", "get_noise_drift_amplitude_nm");
+
+    ClassDB::bind_method(D_METHOD("get_noise_drift_bandwidth_hz"), &ReticleStageSim::get_noise_drift_bandwidth_hz);
+    ClassDB::bind_method(D_METHOD("set_noise_drift_bandwidth_hz", "hz"), &ReticleStageSim::set_noise_drift_bandwidth_hz);
+    ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "noise/drift_bandwidth_hz", PROPERTY_HINT_RANGE, "0.001,1.0,0.001"), "set_noise_drift_bandwidth_hz", "get_noise_drift_bandwidth_hz");
+
+    ClassDB::bind_method(D_METHOD("get_noise_seed"), &ReticleStageSim::get_noise_seed);
+    ClassDB::bind_method(D_METHOD("set_noise_seed", "seed"), &ReticleStageSim::set_noise_seed);
+    ADD_PROPERTY(PropertyInfo(Variant::INT, "noise/seed"), "set_noise_seed", "get_noise_seed");
+
+    ClassDB::bind_method(D_METHOD("get_current_noise_nm"), &ReticleStageSim::get_current_noise_nm);
 
     ClassDB::bind_method(D_METHOD("get_time_scale"), &ReticleStageSim::get_time_scale);
     ClassDB::bind_method(D_METHOD("set_time_scale", "scale"), &ReticleStageSim::set_time_scale);

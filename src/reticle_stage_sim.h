@@ -12,6 +12,7 @@ class ReticleStageSim : public Node {
 private:
     wafer_stage::StageDynamics dynamics_;
     bool running_;
+    bool use_threaded_mode_;
     double time_scale_;
     int steps_per_frame_;
     double max_sim_time_;
@@ -28,6 +29,8 @@ private:
     double simulation_frequency;
     double settling_threshold_nm;
     double max_force;
+    double derivative_filter_cutoff;
+    double derivative_filter_sample_rate;
 
 protected:
     static void _bind_methods();
@@ -79,6 +82,15 @@ public:
     double get_max_force() const;
     void set_max_force(double p_force);
 
+    double get_derivative_filter_cutoff() const;
+    void set_derivative_filter_cutoff(double p_hz);
+
+    double get_derivative_filter_sample_rate() const;
+    void set_derivative_filter_sample_rate(double p_hz);
+
+    bool get_use_threaded_mode() const;
+    void set_use_threaded_mode(bool p_enable);
+
     double get_time_scale() const;
     void set_time_scale(double p_scale);
 
@@ -94,6 +106,9 @@ public:
     double get_settling_time() const;
     bool is_settled() const;
     bool is_running() const;
+    bool has_nan() const;
+    uint32_t get_nan_recovery_count() const;
+    uint64_t get_step_counter() const;
 
     PackedFloat64Array get_error_time_series() const;
     PackedFloat64Array get_position_time_series() const;

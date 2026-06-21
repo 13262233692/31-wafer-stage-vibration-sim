@@ -1,13 +1,16 @@
 #include "reticle_stage_sim.h"
 #include <godot_cpp/core/class_db.hpp>
+#include <godot_cpp/core/memory.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
 
-namespace godot {
+using namespace godot;
 
 ReticleStageSim::ReticleStageSim()
     : running_(false)
+    , use_threaded_mode_(true)
     , time_scale_(1.0)
-    , steps_per_frame_(0)
-    , max_sim_time_(0.2)
+    , steps_per_frame_(100)
+    , max_sim_time_(10.0)
     , mass(50.0)
     , lorentz_force_constant(50.0)
     , spring_stiffness(0.0)
@@ -17,34 +20,37 @@ ReticleStageSim::ReticleStageSim()
     , active_integral_gain(5.0e6)
     , target_position(0.01)
     , accel_g(2.0)
-    , simulation_frequency(100000.0)
+    , simulation_frequency(10000.0)
     , settling_threshold_nm(0.1)
-    , max_force(50000.0) {}
+    , max_force(50000.0)
+    , derivative_filter_cutoff(1500.0)
+    , derivative_filter_sample_rate(10000.0) {}
 
-ReticleStageSim::~ReticleStageSim() {}
+ReticleStageSim::~ReticleStageSim() {
+    stop_simulation();
+}
 
 void ReticleStageSim::_ready() {
-    reset_simulation();
 }
 
 void ReticleStageSim::_process(double delta) {
     if (!running_) return;
 
-    double sim_delta = delta * time_scale_;
-    double dt = 1.0 / simulation_frequency;
-    int steps = static_cast<int>(sim_delta / dt);
-    steps = std::min(steps, 100000);
+    if (dynamics_.get_sim_time() >= max_sim_time_) {
+        stop_simulation();
+        return;
+    }
 
-    for (int i = 0; i < steps; i++) {
-        if (dynamics_.get_sim_time() >= max_sim_time_) {
-            running_ = false;
-            emit_signal("simulation_completed");
-            return;
-        }
+    if (use_threaded_mode_) {
+        return;
+    }
+
+    int n_steps = static_cast<int>(delta * simulation_frequency * time_scale_);
+    n_steps = std::max(1, std::min(n_steps, 2000));
+    for (int i = 0; i < n_steps; i++) {
         dynamics_.step();
-
-        if (dynamics_.is_settled() && !running_) {
-            return;
+        if (dynamics_.is_settled() || dynamics_.get_sim_time() >= max_sim_time_) {
+            break;
         }
     }
 }
@@ -63,13 +69,19 @@ void ReticleStageSim::start_simulation() {
     params.simulation_dt = 1.0 / simulation_frequency;
     params.settling_threshold_nm = settling_threshold_nm;
     params.max_force = max_force;
+    params.derivative_filter_cutoff = derivative_filter_cutoff;
+    params.derivative_filter_sample_rate = derivative_filter_sample_rate;
 
     dynamics_.initialize(params);
     running_ = true;
+
+    if (use_threaded_mode_) {
+        dynamics_.start_threaded_simulation();
+    }
 }
 
 void ReticleStageSim::reset_simulation() {
-    running_ = false;
+    stop_simulation();
     wafer_stage::StageParams params;
     params.mass = mass;
     params.lorentz_force_constant = lorentz_force_constant;
@@ -83,11 +95,16 @@ void ReticleStageSim::reset_simulation() {
     params.simulation_dt = 1.0 / simulation_frequency;
     params.settling_threshold_nm = settling_threshold_nm;
     params.max_force = max_force;
+    params.derivative_filter_cutoff = derivative_filter_cutoff;
+    params.derivative_filter_sample_rate = derivative_filter_sample_rate;
 
     dynamics_.initialize(params);
 }
 
 void ReticleStageSim::stop_simulation() {
+    if (use_threaded_mode_) {
+        dynamics_.stop_threaded_simulation();
+    }
     running_ = false;
 }
 
@@ -113,10 +130,16 @@ double ReticleStageSim::get_active_integral_gain() const { return active_integra
 void ReticleStageSim::set_active_integral_gain(double p_ki) { active_integral_gain = p_ki; }
 
 double ReticleStageSim::get_target_position() const { return target_position; }
-void ReticleStageSim::set_target_position(double p_target) { target_position = p_target; }
+void ReticleStageSim::set_target_position(double p_target) {
+    target_position = p_target;
+    dynamics_.set_target_position(p_target);
+}
 
 double ReticleStageSim::get_accel_g() const { return accel_g; }
-void ReticleStageSim::set_accel_g(double p_g) { accel_g = p_g; }
+void ReticleStageSim::set_accel_g(double p_g) {
+    accel_g = p_g;
+    dynamics_.set_accel_command(p_g * wafer_stage::StageDynamics::GRAVITY);
+}
 
 double ReticleStageSim::get_simulation_frequency() const { return simulation_frequency; }
 void ReticleStageSim::set_simulation_frequency(double p_freq) { simulation_frequency = p_freq; }
@@ -126,6 +149,20 @@ void ReticleStageSim::set_settling_threshold_nm(double p_nm) { settling_threshol
 
 double ReticleStageSim::get_max_force() const { return max_force; }
 void ReticleStageSim::set_max_force(double p_force) { max_force = p_force; }
+
+double ReticleStageSim::get_derivative_filter_cutoff() const { return derivative_filter_cutoff; }
+void ReticleStageSim::set_derivative_filter_cutoff(double p_hz) { derivative_filter_cutoff = p_hz; }
+
+double ReticleStageSim::get_derivative_filter_sample_rate() const { return derivative_filter_sample_rate; }
+void ReticleStageSim::set_derivative_filter_sample_rate(double p_hz) { derivative_filter_sample_rate = p_hz; }
+
+bool ReticleStageSim::get_use_threaded_mode() const { return use_threaded_mode_; }
+void ReticleStageSim::set_use_threaded_mode(bool p_enable) {
+    if (running_) {
+        stop_simulation();
+    }
+    use_threaded_mode_ = p_enable;
+}
 
 double ReticleStageSim::get_time_scale() const { return time_scale_; }
 void ReticleStageSim::set_time_scale(double p_scale) { time_scale_ = p_scale; }
@@ -142,109 +179,115 @@ int ReticleStageSim::get_phase() const { return static_cast<int>(dynamics_.get_p
 double ReticleStageSim::get_settling_time() const { return dynamics_.get_settling_time(); }
 bool ReticleStageSim::is_settled() const { return dynamics_.is_settled(); }
 bool ReticleStageSim::is_running() const { return running_; }
+bool ReticleStageSim::has_nan() const { return dynamics_.has_nan(); }
+uint32_t ReticleStageSim::get_nan_recovery_count() const { return dynamics_.get_nan_recovery_count(); }
+uint64_t ReticleStageSim::get_step_counter() const { return dynamics_.get_step_counter(); }
 
 PackedFloat64Array ReticleStageSim::get_error_time_series() const {
-    const auto &waveform = dynamics_.get_waveform();
+    auto wf = dynamics_.get_waveform_copy();
     PackedFloat64Array arr;
-    arr.resize(waveform.size());
-    for (size_t i = 0; i < waveform.size(); i++) {
-        arr[i] = waveform[i].error * 1e9;
+    arr.resize(wf.size());
+    for (size_t i = 0; i < wf.size(); i++) {
+        arr[i] = wf[i].error * 1e9;
     }
     return arr;
 }
 
 PackedFloat64Array ReticleStageSim::get_position_time_series() const {
-    const auto &waveform = dynamics_.get_waveform();
+    auto wf = dynamics_.get_waveform_copy();
     PackedFloat64Array arr;
-    arr.resize(waveform.size());
-    for (size_t i = 0; i < waveform.size(); i++) {
-        arr[i] = waveform[i].position;
+    arr.resize(wf.size());
+    for (size_t i = 0; i < wf.size(); i++) {
+        arr[i] = wf[i].position * 1000.0;
     }
     return arr;
 }
 
 PackedFloat64Array ReticleStageSim::get_velocity_time_series() const {
-    const auto &waveform = dynamics_.get_waveform();
+    auto wf = dynamics_.get_waveform_copy();
     PackedFloat64Array arr;
-    arr.resize(waveform.size());
-    for (size_t i = 0; i < waveform.size(); i++) {
-        arr[i] = waveform[i].velocity;
+    arr.resize(wf.size());
+    for (size_t i = 0; i < wf.size(); i++) {
+        arr[i] = wf[i].velocity;
     }
     return arr;
 }
 
 PackedFloat64Array ReticleStageSim::get_time_series() const {
-    const auto &waveform = dynamics_.get_waveform();
+    auto wf = dynamics_.get_waveform_copy();
     PackedFloat64Array arr;
-    arr.resize(waveform.size());
-    for (size_t i = 0; i < waveform.size(); i++) {
-        arr[i] = waveform[i].time * 1000.0;
+    arr.resize(wf.size());
+    for (size_t i = 0; i < wf.size(); i++) {
+        arr[i] = wf[i].time * 1000.0;
     }
     return arr;
 }
 
 PackedFloat64Array ReticleStageSim::get_lorentz_force_series() const {
-    const auto &waveform = dynamics_.get_waveform();
+    auto wf = dynamics_.get_waveform_copy();
     PackedFloat64Array arr;
-    arr.resize(waveform.size());
-    for (size_t i = 0; i < waveform.size(); i++) {
-        arr[i] = waveform[i].force_lorentz;
+    arr.resize(wf.size());
+    for (size_t i = 0; i < wf.size(); i++) {
+        arr[i] = wf[i].force_lorentz;
     }
     return arr;
 }
 
 PackedFloat64Array ReticleStageSim::get_spring_force_series() const {
-    const auto &waveform = dynamics_.get_waveform();
+    auto wf = dynamics_.get_waveform_copy();
     PackedFloat64Array arr;
-    arr.resize(waveform.size());
-    for (size_t i = 0; i < waveform.size(); i++) {
-        arr[i] = waveform[i].force_spring;
+    arr.resize(wf.size());
+    for (size_t i = 0; i < wf.size(); i++) {
+        arr[i] = wf[i].force_spring;
     }
     return arr;
 }
 
 PackedFloat64Array ReticleStageSim::get_damping_force_series() const {
-    const auto &waveform = dynamics_.get_waveform();
+    auto wf = dynamics_.get_waveform_copy();
     PackedFloat64Array arr;
-    arr.resize(waveform.size());
-    for (size_t i = 0; i < waveform.size(); i++) {
-        arr[i] = waveform[i].force_damping;
+    arr.resize(wf.size());
+    for (size_t i = 0; i < wf.size(); i++) {
+        arr[i] = wf[i].force_damping;
     }
     return arr;
 }
 
 int ReticleStageSim::get_sample_count() const {
-    return static_cast<int>(dynamics_.get_waveform().size());
+    return static_cast<int>(dynamics_.get_waveform_size());
 }
 
 void ReticleStageSim::_bind_methods() {
+    ClassDB::bind_method(D_METHOD("_process", "delta"), &ReticleStageSim::_process);
+    ClassDB::bind_method(D_METHOD("_ready"), &ReticleStageSim::_ready);
+
     ClassDB::bind_method(D_METHOD("start_simulation"), &ReticleStageSim::start_simulation);
     ClassDB::bind_method(D_METHOD("reset_simulation"), &ReticleStageSim::reset_simulation);
     ClassDB::bind_method(D_METHOD("stop_simulation"), &ReticleStageSim::stop_simulation);
 
     ClassDB::bind_method(D_METHOD("get_mass"), &ReticleStageSim::get_mass);
     ClassDB::bind_method(D_METHOD("set_mass", "mass"), &ReticleStageSim::set_mass);
-    ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "mass", PROPERTY_HINT_RANGE, "1,500,0.1"), "set_mass", "get_mass");
+    ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "mass", PROPERTY_HINT_RANGE, "1,200,0.1"), "set_mass", "get_mass");
 
     ClassDB::bind_method(D_METHOD("get_lorentz_force_constant"), &ReticleStageSim::get_lorentz_force_constant);
     ClassDB::bind_method(D_METHOD("set_lorentz_force_constant", "kf"), &ReticleStageSim::set_lorentz_force_constant);
-    ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "lorentz_force_constant", PROPERTY_HINT_RANGE, "1,500,0.1"), "set_lorentz_force_constant", "get_lorentz_force_constant");
+    ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "lorentz_force_constant", PROPERTY_HINT_RANGE, "1,200,0.1"), "set_lorentz_force_constant", "get_lorentz_force_constant");
 
     ClassDB::bind_method(D_METHOD("get_spring_stiffness"), &ReticleStageSim::get_spring_stiffness);
     ClassDB::bind_method(D_METHOD("set_spring_stiffness", "ks"), &ReticleStageSim::set_spring_stiffness);
-    ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "spring_stiffness", PROPERTY_HINT_RANGE, "1e4,1e8,1e3"), "set_spring_stiffness", "get_spring_stiffness");
+    ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "spring_stiffness", PROPERTY_HINT_RANGE, "0,1e8,1e3"), "set_spring_stiffness", "get_spring_stiffness");
 
     ClassDB::bind_method(D_METHOD("get_passive_damping"), &ReticleStageSim::get_passive_damping);
     ClassDB::bind_method(D_METHOD("set_passive_damping", "cd"), &ReticleStageSim::set_passive_damping);
-    ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "passive_damping", PROPERTY_HINT_RANGE, "0,50000,100"), "set_passive_damping", "get_passive_damping");
+    ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "passive_damping", PROPERTY_HINT_RANGE, "0,10000,10"), "set_passive_damping", "get_passive_damping");
 
     ClassDB::bind_method(D_METHOD("get_active_stiffness"), &ReticleStageSim::get_active_stiffness);
     ClassDB::bind_method(D_METHOD("set_active_stiffness", "ka"), &ReticleStageSim::set_active_stiffness);
-    ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "active_stiffness", PROPERTY_HINT_RANGE, "1e4,1e8,1e3"), "set_active_stiffness", "get_active_stiffness");
+    ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "active_stiffness", PROPERTY_HINT_RANGE, "1e5,1e9,1e4"), "set_active_stiffness", "get_active_stiffness");
 
     ClassDB::bind_method(D_METHOD("get_active_damping"), &ReticleStageSim::get_active_damping);
     ClassDB::bind_method(D_METHOD("set_active_damping", "ca"), &ReticleStageSim::set_active_damping);
-    ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "active_damping", PROPERTY_HINT_RANGE, "0,100000,100"), "set_active_damping", "get_active_damping");
+    ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "active_damping", PROPERTY_HINT_RANGE, "1e3,1e6,1e2"), "set_active_damping", "get_active_damping");
 
     ClassDB::bind_method(D_METHOD("get_active_integral_gain"), &ReticleStageSim::get_active_integral_gain);
     ClassDB::bind_method(D_METHOD("set_active_integral_gain", "ki"), &ReticleStageSim::set_active_integral_gain);
@@ -252,7 +295,7 @@ void ReticleStageSim::_bind_methods() {
 
     ClassDB::bind_method(D_METHOD("get_target_position"), &ReticleStageSim::get_target_position);
     ClassDB::bind_method(D_METHOD("set_target_position", "target"), &ReticleStageSim::set_target_position);
-    ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "target_position", PROPERTY_HINT_RANGE, "0.001,0.5,0.001"), "set_target_position", "get_target_position");
+    ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "target_position", PROPERTY_HINT_RANGE, "-0.1,0.1,0.0001"), "set_target_position", "get_target_position");
 
     ClassDB::bind_method(D_METHOD("get_accel_g"), &ReticleStageSim::get_accel_g);
     ClassDB::bind_method(D_METHOD("set_accel_g", "g"), &ReticleStageSim::set_accel_g);
@@ -260,7 +303,7 @@ void ReticleStageSim::_bind_methods() {
 
     ClassDB::bind_method(D_METHOD("get_simulation_frequency"), &ReticleStageSim::get_simulation_frequency);
     ClassDB::bind_method(D_METHOD("set_simulation_frequency", "freq"), &ReticleStageSim::set_simulation_frequency);
-    ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "simulation_frequency", PROPERTY_HINT_RANGE, "10000,1000000,1000"), "set_simulation_frequency", "get_simulation_frequency");
+    ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "simulation_frequency", PROPERTY_HINT_RANGE, "1000,100000,1000"), "set_simulation_frequency", "get_simulation_frequency");
 
     ClassDB::bind_method(D_METHOD("get_settling_threshold_nm"), &ReticleStageSim::get_settling_threshold_nm);
     ClassDB::bind_method(D_METHOD("set_settling_threshold_nm", "nm"), &ReticleStageSim::set_settling_threshold_nm);
@@ -270,13 +313,25 @@ void ReticleStageSim::_bind_methods() {
     ClassDB::bind_method(D_METHOD("set_max_force", "force"), &ReticleStageSim::set_max_force);
     ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "max_force", PROPERTY_HINT_RANGE, "100,100000,100"), "set_max_force", "get_max_force");
 
+    ClassDB::bind_method(D_METHOD("get_derivative_filter_cutoff"), &ReticleStageSim::get_derivative_filter_cutoff);
+    ClassDB::bind_method(D_METHOD("set_derivative_filter_cutoff", "hz"), &ReticleStageSim::set_derivative_filter_cutoff);
+    ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "derivative_filter_cutoff_hz", PROPERTY_HINT_RANGE, "10,5000,10"), "set_derivative_filter_cutoff", "get_derivative_filter_cutoff");
+
+    ClassDB::bind_method(D_METHOD("get_derivative_filter_sample_rate"), &ReticleStageSim::get_derivative_filter_sample_rate);
+    ClassDB::bind_method(D_METHOD("set_derivative_filter_sample_rate", "hz"), &ReticleStageSim::set_derivative_filter_sample_rate);
+    ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "derivative_filter_sample_rate_hz", PROPERTY_HINT_RANGE, "1000,100000,1000"), "set_derivative_filter_sample_rate", "get_derivative_filter_sample_rate");
+
+    ClassDB::bind_method(D_METHOD("get_use_threaded_mode"), &ReticleStageSim::get_use_threaded_mode);
+    ClassDB::bind_method(D_METHOD("set_use_threaded_mode", "enable"), &ReticleStageSim::set_use_threaded_mode);
+    ADD_PROPERTY(PropertyInfo(Variant::BOOL, "use_threaded_10kHz_physics"), "set_use_threaded_mode", "get_use_threaded_mode");
+
     ClassDB::bind_method(D_METHOD("get_time_scale"), &ReticleStageSim::get_time_scale);
     ClassDB::bind_method(D_METHOD("set_time_scale", "scale"), &ReticleStageSim::set_time_scale);
     ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "time_scale", PROPERTY_HINT_RANGE, "0.01,10,0.01"), "set_time_scale", "get_time_scale");
 
     ClassDB::bind_method(D_METHOD("get_max_sim_time"), &ReticleStageSim::get_max_sim_time);
     ClassDB::bind_method(D_METHOD("set_max_sim_time", "time"), &ReticleStageSim::set_max_sim_time);
-    ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "max_sim_time", PROPERTY_HINT_RANGE, "0.01,5,0.01"), "set_max_sim_time", "get_max_sim_time");
+    ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "max_sim_time", PROPERTY_HINT_RANGE, "0.1,100,0.1"), "set_max_sim_time", "get_max_sim_time");
 
     ClassDB::bind_method(D_METHOD("get_position"), &ReticleStageSim::get_position);
     ClassDB::bind_method(D_METHOD("get_velocity"), &ReticleStageSim::get_velocity);
@@ -287,6 +342,9 @@ void ReticleStageSim::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_settling_time"), &ReticleStageSim::get_settling_time);
     ClassDB::bind_method(D_METHOD("is_settled"), &ReticleStageSim::is_settled);
     ClassDB::bind_method(D_METHOD("is_running"), &ReticleStageSim::is_running);
+    ClassDB::bind_method(D_METHOD("has_nan"), &ReticleStageSim::has_nan);
+    ClassDB::bind_method(D_METHOD("get_nan_recovery_count"), &ReticleStageSim::get_nan_recovery_count);
+    ClassDB::bind_method(D_METHOD("get_step_counter"), &ReticleStageSim::get_step_counter);
 
     ClassDB::bind_method(D_METHOD("get_error_time_series"), &ReticleStageSim::get_error_time_series);
     ClassDB::bind_method(D_METHOD("get_position_time_series"), &ReticleStageSim::get_position_time_series);
@@ -296,9 +354,4 @@ void ReticleStageSim::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_spring_force_series"), &ReticleStageSim::get_spring_force_series);
     ClassDB::bind_method(D_METHOD("get_damping_force_series"), &ReticleStageSim::get_damping_force_series);
     ClassDB::bind_method(D_METHOD("get_sample_count"), &ReticleStageSim::get_sample_count);
-
-    ADD_SIGNAL(MethodInfo("simulation_completed"));
-    ADD_SIGNAL(MethodInfo("settling_achieved", PropertyInfo(Variant::FLOAT, "settling_time_ms")));
-}
-
 }

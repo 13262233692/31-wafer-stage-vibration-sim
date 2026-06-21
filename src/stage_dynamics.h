@@ -1,8 +1,14 @@
 #pragma once
 
 #include "rk4_integrator.h"
+#include "elliptic_filter.h"
 #include <cstdint>
 #include <vector>
+#include <atomic>
+#include <mutex>
+#include <thread>
+#include <condition_variable>
+#include <memory>
 
 namespace wafer_stage {
 
@@ -39,68 +45,111 @@ struct StageParams {
     double simulation_dt;
     double settling_threshold_nm;
     double max_force;
+    double derivative_filter_cutoff;
+    double derivative_filter_sample_rate;
 };
 
 class StageDynamics {
 public:
     static constexpr double GRAVITY = 9.80665;
+    static constexpr double THREAD_DT = 1.0e-4;
 
 private:
     StageParams params_;
     StageState state_;
+    StageState state_snapshot_;
     double sim_time_;
+    double sim_time_snapshot_;
     double integral_error_;
     double prev_error_;
+    double filtered_derivative_;
     MotionPhase phase_;
+    MotionPhase phase_snapshot_;
     double phase_start_time_;
     double accel_duration_;
     double decel_start_time_;
     double settle_start_time_;
     double settling_time_;
+    double settling_time_snapshot_;
     bool settled_;
+    bool settled_snapshot_;
+
+    std::unique_ptr<EllipticLowPass4> derivative_filter_;
+    std::unique_ptr<EllipticLowPass4> velocity_filter_;
 
     std::vector<WaveformSample> waveform_;
+    std::vector<WaveformSample> waveform_snapshot_;
     double record_interval_;
     double last_record_time_;
+
+    std::atomic<bool> thread_running_;
+    std::atomic<bool> sim_active_;
+    std::thread sim_thread_;
+    mutable std::mutex state_mutex_;
+    std::condition_variable sim_cv_;
+    std::mutex sim_start_mutex_;
+
+    std::atomic<uint64_t> step_counter_;
+    std::atomic<bool> nan_detected_;
+    std::atomic<uint32_t> nan_recovery_count_;
+    double stable_since_;
 
     double compute_lorentz_force(double current) const;
     double compute_spring_force(double position) const;
     double compute_passive_damping_force(double velocity) const;
-    double compute_active_force(double error, double velocity, double integral_error) const;
-    double compute_feedforward_accel() const;
+    double compute_active_force(double error, double filtered_deriv, double integral_error) const;
+    double compute_feedforward_accel(double t_local) const;
     double compute_reference_position(double t) const;
     double compute_reference_velocity(double t) const;
-    double compute_tracking_error() const;
+    double compute_tracking_error(double t) const;
 
-    void update_phase();
-    void record_sample(double force_lorentz, double force_spring, double force_damping, double current);
+    void update_phase(double t);
+    void record_sample_internal(double force_lorentz, double force_spring,
+                                double force_damping, double current);
+
+    void snapshot_state_locked();
+    void orthonormalize_coupling();
+    bool check_and_recover_nan();
+
+    void thread_loop();
+    void step_internal(double dt);
 
 public:
     StageDynamics();
+    ~StageDynamics();
 
     void initialize(const StageParams &params);
     void reset();
+
+    void start_threaded_simulation();
+    void stop_threaded_simulation();
+    bool is_thread_running() const { return thread_running_.load(); }
 
     StageDerivative dynamics(const StageState &s, double t) const;
 
     void step();
 
-    const StageState &get_state() const { return state_; }
-    double get_sim_time() const { return sim_time_; }
-    MotionPhase get_phase() const { return phase_; }
-    double get_position() const { return state_.x; }
-    double get_velocity() const { return state_.v; }
-    double get_position_error() const { return params_.target_position - state_.x; }
+    StageState get_state() const;
+    double get_sim_time() const;
+    MotionPhase get_phase() const;
+    double get_position() const;
+    double get_velocity() const;
+    double get_position_error() const;
     double get_position_error_nm() const;
-    double get_settling_time() const { return settling_time_; }
-    bool is_settled() const { return settled_; }
+    double get_settling_time() const;
+    bool is_settled() const;
     const StageParams &get_params() const { return params_; }
 
-    const std::vector<WaveformSample> &get_waveform() const { return waveform_; }
-    void clear_waveform() { waveform_.clear(); }
+    std::vector<WaveformSample> get_waveform_copy() const;
+    size_t get_waveform_size() const;
+    void clear_waveform();
 
-    void set_target_position(double target) { params_.target_position = target; }
-    void set_accel_command(double accel) { params_.accel_command = accel; }
+    void set_target_position(double target);
+    void set_accel_command(double accel);
+
+    uint64_t get_step_counter() const { return step_counter_.load(); }
+    bool has_nan() const { return nan_detected_.load(); }
+    uint32_t get_nan_recovery_count() const { return nan_recovery_count_.load(); }
 };
 
 }
